@@ -1,291 +1,6 @@
-<html lang="pt-BR"><head>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html-to-image/1.11.13/html-to-image.min.js" integrity="sha512-iZ2ORl595Wx6miw+GuadDet4WQbdSWS3JLMoNfY8cRGoEFy6oT3G9IbcrBeL6AfkgpA51ETt/faX6yLV+/gFJg==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
-    <script>
-      (function() {
-        const originalConsole = window.console;
-        window.console = {
-          log: (...args) => {
-            originalConsole.log(...args);
-            window.parent.postMessage({ type: 'console', message: args.join(' ') }, '*');
-          },
-          error: (...args) => {
-            originalConsole.error(...args);
-            window.parent.postMessage({ type: 'console', message: 'Error: ' + args.join(' ') }, '*');
-          },
-          warn: (...args) => {
-            originalConsole.warn(...args);
-            window.parent.postMessage({ type: 'console', message: 'Warning: ' + args.join(' ') }, '*');
-          }
-        };
-
-        let requestId = 0;
-        let callbacksMap = new Map();
-        let streamControllers = new Map();
-        
-        window.claude = {
-          complete: (prompt) => {
-            return new Promise((resolve, reject) => {
-              const id = requestId++;
-              callbacksMap.set(id, { resolve, reject });
-              window.parent.postMessage({ type: 'claudeComplete', id, prompt }, '*');
-            });
-          }
-        };
-
-        window.storage = {
-          get: (key, shared = false) => {
-            return new Promise((resolve, reject) => {
-              const id = requestId++;
-              callbacksMap.set(id, { resolve, reject });
-              window.parent.postMessage({ type: 'storageGet', id, key, shared }, '*');
-            });
-          },
-          set: (key, value, shared = false) => {
-            return new Promise((resolve, reject) => {
-              const id = requestId++;
-              callbacksMap.set(id, { resolve, reject });
-              window.parent.postMessage({ type: 'storageSet', id, key, value, shared }, '*');
-            });
-          },
-          delete: (key, shared = false) => {
-            return new Promise((resolve, reject) => {
-              const id = requestId++;
-              callbacksMap.set(id, { resolve, reject });
-              window.parent.postMessage({ type: 'storageDelete', id, key, shared }, '*');
-            });
-          },
-          list: (prefix, shared = false) => {
-            return new Promise((resolve, reject) => {
-              const id = requestId++;
-              callbacksMap.set(id, { resolve, reject });
-              window.parent.postMessage({ type: 'storageList', id, prefix, shared }, '*');
-            });
-          }
-        };
-
-        let pendingBlobs = new Map();
-        URL.createObjectURL = (blob) => {
-          // Store the blob and create an ID and URL for it
-          const blobId = `blob-${Date.now()}-${Math.random()}`;
-          pendingBlobs.set(blobId, blob);
-          return `blob-request://${blobId}`;
-        };
-
-        URL.revokeObjectURL = (url) => {
-          // Remove the blob from our store
-          const blobId = url.replace("blob-request://", "");
-          pendingBlobs.delete(blobId);
-        };
-
-        const getBlobFromURL = (url) => {
-          const blobId = url.replace("blob-request://", "");
-          return pendingBlobs.get(blobId);
-        };
-
-        // Override global fetch with streaming support
-        window.fetch = (url, init = {}) => {
-          return new Promise((resolve, reject) => {
-            const id = requestId++;
-            const channelId = `fetch-${id}-${Date.now()}`;
-            
-            callbacksMap.set(id, { 
-              resolve: (response) => {
-                // Create a ReadableStream for the response body
-                const stream = new ReadableStream({
-                  start(controller) {
-                    streamControllers.set(channelId, controller);
-                  },
-                  cancel() {
-                    streamControllers.delete(channelId);
-                  }
-                });
-                
-                // Create and return the Response with the stream
-                resolve(new Response(stream, {
-                  status: response.status,
-                  statusText: response.statusText,
-                  headers: response.headers
-                }));
-              },
-              reject,
-              channelId
-            });
-            
-            window.parent.postMessage({
-              type: 'proxyFetch',
-              id,
-              url,
-              init,
-              channelId
-            }, '*');
-          });
-        };
-
-        window.addEventListener('message', async (event) => {
-          if (event.data.type === 'takeScreenshot') {
-            const rootElement = document.getElementById('artifacts-component-root-html');
-            if (!rootElement) {
-              window.parent.postMessage({
-                type: 'screenshotError',
-                error: new Error('Root element not found'),
-              }, '*');
-            }
-            const screenshot = await htmlToImage.toPng(rootElement, {
-              imagePlaceholder:
-                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAAXNSR0IArs4c6QAAAA1JREFUGFdjePDgwX8ACOQDoNsk0PMAAAAASUVORK5CYII=",
-            });
-            window.parent.postMessage({
-              type: 'screenshotData',
-              data: screenshot,
-            }, '*');
-          } else if (event.data.type === 'claudeComplete') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.completion);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'proxyFetchResponse') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-              callbacksMap.delete(event.data.id);
-            } else {
-              // Initial response with headers, status, etc.
-              callback.resolve({
-                status: event.data.status,
-                statusText: event.data.statusText,
-                headers: event.data.headers
-              });
-              // Don't delete the callback yet if streaming
-              if (!event.data.body) {
-                callbacksMap.delete(event.data.id);
-              }
-            }
-          } else if (event.data.type === 'proxyFetchStream') {
-            // Handle streaming data chunks
-            const controller = streamControllers.get(event.data.channelId);
-            if (controller) {
-              if (event.data.error) {
-                controller.error(new Error(event.data.error));
-                streamControllers.delete(event.data.channelId);
-              } else if (event.data.done) {
-                controller.close();
-                streamControllers.delete(event.data.channelId);
-                // Clean up the callback
-                const callback = Array.from(callbacksMap.entries()).find(
-                  ([_, value]) => value.channelId === event.data.channelId
-                );
-                if (callback) {
-                  callbacksMap.delete(callback[0]);
-                }
-              } else if (event.data.chunk) {
-                controller.enqueue(new Uint8Array(event.data.chunk));
-              }
-            }
-          } else if (event.data.type === 'storageGet') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.result);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'storageSet') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.result);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'storageDelete') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.result);
-            }
-            callbacksMap.delete(event.data.id);
-          } else if (event.data.type === 'storageList') {
-            const callback = callbacksMap.get(event.data.id);
-            if (event.data.error) {
-              callback.reject(new Error(event.data.error));
-            } else {
-              callback.resolve(event.data.result);
-            }
-            callbacksMap.delete(event.data.id);
-          }
-        });
-
-        window.addEventListener('click', (event) => {
-          const isEl = event.target instanceof HTMLElement;
-          if (!isEl) return;
-    
-          // find ancestor links
-          const linkEl = event.target.closest("a");
-          if (!linkEl || !linkEl.href) return;
-    
-          event.preventDefault();
-          event.stopImmediatePropagation();
-    
-          if (linkEl.href.startsWith("blob-request:")) {
-            const blob = getBlobFromURL(linkEl.href);
-            if (!blob) return;
-            void blob.arrayBuffer().then((data) => {
-              window.parent.postMessage({
-                type: "downloadFile",
-                filename: linkEl.download,
-                data,
-                mimeType: blob.type || "application/octet-stream",
-              });
-            });
-          } else if (linkEl.href.startsWith("data:")) {
-            const [header, base64Data] = linkEl.href.split(",");
-            const mimeMatch = header.match(/data:([^;]+)/);
-            const mimeType = mimeMatch ? mimeMatch[1] : "application/octet-stream";
-            const binaryString = atob(base64Data);
-            const data = Uint8Array.from(binaryString, (c) =>
-              c.charCodeAt(0),
-            ).buffer;
-            window.parent.postMessage({
-              type: "downloadFile",
-              filename: linkEl.download,
-              data,
-              mimeType,
-            });
-          } else {
-            let linkUrl;
-            try {
-              linkUrl = new URL(linkEl.href);
-            } catch (error) {
-              return;
-            }
-    
-            if (linkUrl.hostname === window.location.hostname) return;
-      
-            window.parent.postMessage({
-              type: 'openExternal',
-              href: linkEl.href,
-            }, '*');
-          }
-      });
-
-        const originalOpen = window.open;
-        window.open = function (url) {
-          window.parent.postMessage({
-            type: "openExternal",
-            href: url,
-          }, "*");
-        };
-
-        window.addEventListener('error', (event) => {
-          window.parent.postMessage({ type: 'console', message: 'Uncaught Error: ' + event.message }, '*');
-        });
-      })();
-    </script>
-  
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="apple-mobile-web-app-capable" content="yes">
@@ -293,7 +8,7 @@
     <title>Meta 12kg - Tracker Inteligente</title>
 
     <script src="https://cdn.tailwindcss.com"></script>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&amp;display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@24,400,1,0" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
@@ -309,16 +24,16 @@
         input[type="number"]::-webkit-inner-spin-button,
         input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
     </style>
-<style>*, ::before, ::after{--tw-border-spacing-x:0;--tw-border-spacing-y:0;--tw-translate-x:0;--tw-translate-y:0;--tw-rotate:0;--tw-skew-x:0;--tw-skew-y:0;--tw-scale-x:1;--tw-scale-y:1;--tw-pan-x: ;--tw-pan-y: ;--tw-pinch-zoom: ;--tw-scroll-snap-strictness:proximity;--tw-gradient-from-position: ;--tw-gradient-via-position: ;--tw-gradient-to-position: ;--tw-ordinal: ;--tw-slashed-zero: ;--tw-numeric-figure: ;--tw-numeric-spacing: ;--tw-numeric-fraction: ;--tw-ring-inset: ;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-color:rgb(59 130 246 / 0.5);--tw-ring-offset-shadow:0 0 #0000;--tw-ring-shadow:0 0 #0000;--tw-shadow:0 0 #0000;--tw-shadow-colored:0 0 #0000;--tw-blur: ;--tw-brightness: ;--tw-contrast: ;--tw-grayscale: ;--tw-hue-rotate: ;--tw-invert: ;--tw-saturate: ;--tw-sepia: ;--tw-drop-shadow: ;--tw-backdrop-blur: ;--tw-backdrop-brightness: ;--tw-backdrop-contrast: ;--tw-backdrop-grayscale: ;--tw-backdrop-hue-rotate: ;--tw-backdrop-invert: ;--tw-backdrop-opacity: ;--tw-backdrop-saturate: ;--tw-backdrop-sepia: ;--tw-contain-size: ;--tw-contain-layout: ;--tw-contain-paint: ;--tw-contain-style: }::backdrop{--tw-border-spacing-x:0;--tw-border-spacing-y:0;--tw-translate-x:0;--tw-translate-y:0;--tw-rotate:0;--tw-skew-x:0;--tw-skew-y:0;--tw-scale-x:1;--tw-scale-y:1;--tw-pan-x: ;--tw-pan-y: ;--tw-pinch-zoom: ;--tw-scroll-snap-strictness:proximity;--tw-gradient-from-position: ;--tw-gradient-via-position: ;--tw-gradient-to-position: ;--tw-ordinal: ;--tw-slashed-zero: ;--tw-numeric-figure: ;--tw-numeric-spacing: ;--tw-numeric-fraction: ;--tw-ring-inset: ;--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-color:rgb(59 130 246 / 0.5);--tw-ring-offset-shadow:0 0 #0000;--tw-ring-shadow:0 0 #0000;--tw-shadow:0 0 #0000;--tw-shadow-colored:0 0 #0000;--tw-blur: ;--tw-brightness: ;--tw-contrast: ;--tw-grayscale: ;--tw-hue-rotate: ;--tw-invert: ;--tw-saturate: ;--tw-sepia: ;--tw-drop-shadow: ;--tw-backdrop-blur: ;--tw-backdrop-brightness: ;--tw-backdrop-contrast: ;--tw-backdrop-grayscale: ;--tw-backdrop-hue-rotate: ;--tw-backdrop-invert: ;--tw-backdrop-opacity: ;--tw-backdrop-saturate: ;--tw-backdrop-sepia: ;--tw-contain-size: ;--tw-contain-layout: ;--tw-contain-paint: ;--tw-contain-style: }/* ! tailwindcss v3.4.17 | MIT License | https://tailwindcss.com */*,::after,::before{box-sizing:border-box;border-width:0;border-style:solid;border-color:#e5e7eb}::after,::before{--tw-content:''}:host,html{line-height:1.5;-webkit-text-size-adjust:100%;-moz-tab-size:4;tab-size:4;font-family:ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";font-feature-settings:normal;font-variation-settings:normal;-webkit-tap-highlight-color:transparent}body{margin:0;line-height:inherit}hr{height:0;color:inherit;border-top-width:1px}abbr:where([title]){-webkit-text-decoration:underline dotted;text-decoration:underline dotted}h1,h2,h3,h4,h5,h6{font-size:inherit;font-weight:inherit}a{color:inherit;text-decoration:inherit}b,strong{font-weight:bolder}code,kbd,pre,samp{font-family:ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;font-feature-settings:normal;font-variation-settings:normal;font-size:1em}small{font-size:80%}sub,sup{font-size:75%;line-height:0;position:relative;vertical-align:baseline}sub{bottom:-.25em}sup{top:-.5em}table{text-indent:0;border-color:inherit;border-collapse:collapse}button,input,optgroup,select,textarea{font-family:inherit;font-feature-settings:inherit;font-variation-settings:inherit;font-size:100%;font-weight:inherit;line-height:inherit;letter-spacing:inherit;color:inherit;margin:0;padding:0}button,select{text-transform:none}button,input:where([type=button]),input:where([type=reset]),input:where([type=submit]){-webkit-appearance:button;background-color:transparent;background-image:none}:-moz-focusring{outline:auto}:-moz-ui-invalid{box-shadow:none}progress{vertical-align:baseline}::-webkit-inner-spin-button,::-webkit-outer-spin-button{height:auto}[type=search]{-webkit-appearance:textfield;outline-offset:-2px}::-webkit-search-decoration{-webkit-appearance:none}::-webkit-file-upload-button{-webkit-appearance:button;font:inherit}summary{display:list-item}blockquote,dd,dl,figure,h1,h2,h3,h4,h5,h6,hr,p,pre{margin:0}fieldset{margin:0;padding:0}legend{padding:0}menu,ol,ul{list-style:none;margin:0;padding:0}dialog{padding:0}textarea{resize:vertical}input::placeholder,textarea::placeholder{opacity:1;color:#9ca3af}[role=button],button{cursor:pointer}:disabled{cursor:default}audio,canvas,embed,iframe,img,object,svg,video{display:block;vertical-align:middle}img,video{max-width:100%;height:auto}[hidden]:where(:not([hidden=until-found])){display:none}.fixed{position:fixed}.absolute{position:absolute}.relative{position:relative}.inset-0{inset:0px}.bottom-0{bottom:0px}.left-0{left:0px}.right-0{right:0px}.right-\[-30px\]{right:-30px}.top-0{top:0px}.top-\[-30px\]{top:-30px}.z-10{z-index:10}.z-50{z-index:50}.z-\[100\]{z-index:100}.z-\[200\]{z-index:200}.col-span-2{grid-column:span 2 / span 2}.mx-auto{margin-left:auto;margin-right:auto}.mb-0\.5{margin-bottom:0.125rem}.mb-1{margin-bottom:0.25rem}.mb-10{margin-bottom:2.5rem}.mb-12{margin-bottom:3rem}.mb-2{margin-bottom:0.5rem}.mb-3{margin-bottom:0.75rem}.mb-4{margin-bottom:1rem}.mb-6{margin-bottom:1.5rem}.mb-8{margin-bottom:2rem}.mt-0\.5{margin-top:0.125rem}.mt-1{margin-top:0.25rem}.mt-2{margin-top:0.5rem}.mt-4{margin-top:1rem}.block{display:block}.flex{display:flex}.grid{display:grid}.hidden{display:none}.h-12{height:3rem}.h-14{height:3.5rem}.h-16{height:4rem}.h-2\.5{height:0.625rem}.h-20{height:5rem}.h-24{height:6rem}.h-6{height:1.5rem}.h-64{height:16rem}.h-full{height:100%}.min-h-screen{min-height:100vh}.w-12{width:3rem}.w-24{width:6rem}.w-6{width:1.5rem}.w-full{width:100%}.max-w-lg{max-width:32rem}.max-w-sm{max-width:24rem}.max-w-xs{max-width:20rem}.flex-1{flex:1 1 0%}@keyframes pulse{50%{opacity:.5}}.animate-pulse{animation:pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite}.cursor-pointer{cursor:pointer}.select-none{-webkit-user-select:none;user-select:none}.grid-cols-2{grid-template-columns:repeat(2, minmax(0, 1fr))}.grid-cols-3{grid-template-columns:repeat(3, minmax(0, 1fr))}.grid-cols-4{grid-template-columns:repeat(4, minmax(0, 1fr))}.flex-col{flex-direction:column}.items-start{align-items:flex-start}.items-end{align-items:flex-end}.items-center{align-items:center}.justify-center{justify-content:center}.justify-between{justify-content:space-between}.justify-around{justify-content:space-around}.gap-0\.5{gap:0.125rem}.gap-2{gap:0.5rem}.gap-3{gap:0.75rem}.space-y-2 > :not([hidden]) ~ :not([hidden]){--tw-space-y-reverse:0;margin-top:calc(0.5rem * calc(1 - var(--tw-space-y-reverse)));margin-bottom:calc(0.5rem * var(--tw-space-y-reverse))}.space-y-5 > :not([hidden]) ~ :not([hidden]){--tw-space-y-reverse:0;margin-top:calc(1.25rem * calc(1 - var(--tw-space-y-reverse)));margin-bottom:calc(1.25rem * var(--tw-space-y-reverse))}.space-y-6 > :not([hidden]) ~ :not([hidden]){--tw-space-y-reverse:0;margin-top:calc(1.5rem * calc(1 - var(--tw-space-y-reverse)));margin-bottom:calc(1.5rem * var(--tw-space-y-reverse))}.overflow-hidden{overflow:hidden}.rounded-2xl{border-radius:1rem}.rounded-3xl{border-radius:1.5rem}.rounded-\[35px\]{border-radius:35px}.rounded-\[40px\]{border-radius:40px}.rounded-full{border-radius:9999px}.rounded-xl{border-radius:0.75rem}.border{border-width:1px}.border-2{border-width:2px}.border-b{border-bottom-width:1px}.border-b-2{border-bottom-width:2px}.border-t{border-top-width:1px}.border-emerald-500{--tw-border-opacity:1;border-color:rgb(16 185 129 / var(--tw-border-opacity, 1))}.border-slate-100{--tw-border-opacity:1;border-color:rgb(241 245 249 / var(--tw-border-opacity, 1))}.border-slate-200{--tw-border-opacity:1;border-color:rgb(226 232 240 / var(--tw-border-opacity, 1))}.border-slate-800{--tw-border-opacity:1;border-color:rgb(30 41 59 / var(--tw-border-opacity, 1))}.border-transparent{border-color:transparent}.border-white\/10{border-color:rgb(255 255 255 / 0.1)}.bg-blue-50{--tw-bg-opacity:1;background-color:rgb(239 246 255 / var(--tw-bg-opacity, 1))}.bg-emerald-50{--tw-bg-opacity:1;background-color:rgb(236 253 245 / var(--tw-bg-opacity, 1))}.bg-emerald-500{--tw-bg-opacity:1;background-color:rgb(16 185 129 / var(--tw-bg-opacity, 1))}.bg-emerald-500\/20{background-color:rgb(16 185 129 / 0.2)}.bg-emerald-600{--tw-bg-opacity:1;background-color:rgb(5 150 105 / var(--tw-bg-opacity, 1))}.bg-slate-100{--tw-bg-opacity:1;background-color:rgb(241 245 249 / var(--tw-bg-opacity, 1))}.bg-slate-50{--tw-bg-opacity:1;background-color:rgb(248 250 252 / var(--tw-bg-opacity, 1))}.bg-slate-800{--tw-bg-opacity:1;background-color:rgb(30 41 59 / var(--tw-bg-opacity, 1))}.bg-slate-900{--tw-bg-opacity:1;background-color:rgb(15 23 42 / var(--tw-bg-opacity, 1))}.bg-slate-900\/40{background-color:rgb(15 23 42 / 0.4)}.bg-transparent{background-color:transparent}.bg-white{--tw-bg-opacity:1;background-color:rgb(255 255 255 / var(--tw-bg-opacity, 1))}.bg-white\/20{background-color:rgb(255 255 255 / 0.2)}.bg-white\/90{background-color:rgb(255 255 255 / 0.9)}.bg-white\/95{background-color:rgb(255 255 255 / 0.95)}.p-2{padding:0.5rem}.p-3{padding:0.75rem}.p-4{padding:1rem}.p-5{padding:1.25rem}.p-6{padding:1.5rem}.p-8{padding:2rem}.px-2{padding-left:0.5rem;padding-right:0.5rem}.px-4{padding-left:1rem;padding-right:1rem}.px-5{padding-left:1.25rem;padding-right:1.25rem}.py-0\.5{padding-top:0.125rem;padding-bottom:0.125rem}.py-3{padding-top:0.75rem;padding-bottom:0.75rem}.pb-24{padding-bottom:6rem}.pt-20{padding-top:5rem}.pt-3{padding-top:0.75rem}.pt-4{padding-top:1rem}.text-center{text-align:center}.text-right{text-align:right}.text-2xl{font-size:1.5rem;line-height:2rem}.text-4xl{font-size:2.25rem;line-height:2.5rem}.text-5xl{font-size:3rem;line-height:1}.text-6xl{font-size:3.75rem;line-height:1}.text-\[10px\]{font-size:10px}.text-\[11px\]{font-size:11px}.text-\[180px\]{font-size:180px}.text-\[8px\]{font-size:8px}.text-\[9px\]{font-size:9px}.text-lg{font-size:1.125rem;line-height:1.75rem}.text-sm{font-size:0.875rem;line-height:1.25rem}.text-xl{font-size:1.25rem;line-height:1.75rem}.text-xs{font-size:0.75rem;line-height:1rem}.font-black{font-weight:900}.font-bold{font-weight:700}.font-extrabold{font-weight:800}.uppercase{text-transform:uppercase}.leading-none{line-height:1}.leading-tight{line-height:1.25}.tracking-tighter{letter-spacing:-0.05em}.tracking-widest{letter-spacing:0.1em}.text-slate-800{--tw-text-opacity:1;color:rgb(30 41 59 / var(--tw-text-opacity, 1))}.text-blue-600{--tw-text-opacity:1;color:rgb(37 99 235 / var(--tw-text-opacity, 1))}.text-emerald-400{--tw-text-opacity:1;color:rgb(52 211 153 / var(--tw-text-opacity, 1))}.text-emerald-600{--tw-text-opacity:1;color:rgb(5 150 105 / var(--tw-text-opacity, 1))}.text-slate-200{--tw-text-opacity:1;color:rgb(226 232 240 / var(--tw-text-opacity, 1))}.text-slate-300{--tw-text-opacity:1;color:rgb(203 213 225 / var(--tw-text-opacity, 1))}.text-slate-400{--tw-text-opacity:1;color:rgb(148 163 184 / var(--tw-text-opacity, 1))}.text-slate-500{--tw-text-opacity:1;color:rgb(100 116 139 / var(--tw-text-opacity, 1))}.text-slate-700{--tw-text-opacity:1;color:rgb(51 65 85 / var(--tw-text-opacity, 1))}.text-slate-900{--tw-text-opacity:1;color:rgb(15 23 42 / var(--tw-text-opacity, 1))}.text-white{--tw-text-opacity:1;color:rgb(255 255 255 / var(--tw-text-opacity, 1))}.text-blue-500{--tw-text-opacity:1;color:rgb(59 130 246 / var(--tw-text-opacity, 1))}.accent-emerald-500{accent-color:#10b981}.opacity-10{opacity:0.1}.opacity-60{opacity:0.6}.shadow-2xl{--tw-shadow:0 25px 50px -12px rgb(0 0 0 / 0.25);--tw-shadow-colored:0 25px 50px -12px var(--tw-shadow-color);box-shadow:var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow)}.shadow-lg{--tw-shadow:0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);--tw-shadow-colored:0 10px 15px -3px var(--tw-shadow-color), 0 4px 6px -4px var(--tw-shadow-color);box-shadow:var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow)}.shadow-sm{--tw-shadow:0 1px 2px 0 rgb(0 0 0 / 0.05);--tw-shadow-colored:0 1px 2px 0 var(--tw-shadow-color);box-shadow:var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow)}.shadow-xl{--tw-shadow:0 20px 25px -5px rgb(0 0 0 / 0.1), 0 8px 10px -6px rgb(0 0 0 / 0.1);--tw-shadow-colored:0 20px 25px -5px var(--tw-shadow-color), 0 8px 10px -6px var(--tw-shadow-color);box-shadow:var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow, 0 0 #0000), var(--tw-shadow)}.shadow-emerald-200{--tw-shadow-color:#a7f3d0;--tw-shadow:var(--tw-shadow-colored)}.shadow-emerald-500\/20{--tw-shadow-color:rgb(16 185 129 / 0.2);--tw-shadow:var(--tw-shadow-colored)}.shadow-slate-900\/20{--tw-shadow-color:rgb(15 23 42 / 0.2);--tw-shadow:var(--tw-shadow-colored)}.outline-none{outline:2px solid transparent;outline-offset:2px}.backdrop-blur-md{--tw-backdrop-blur:blur(12px);-webkit-backdrop-filter:var(--tw-backdrop-blur) var(--tw-backdrop-brightness) var(--tw-backdrop-contrast) var(--tw-backdrop-grayscale) var(--tw-backdrop-hue-rotate) var(--tw-backdrop-invert) var(--tw-backdrop-opacity) var(--tw-backdrop-saturate) var(--tw-backdrop-sepia);backdrop-filter:var(--tw-backdrop-blur) var(--tw-backdrop-brightness) var(--tw-backdrop-contrast) var(--tw-backdrop-grayscale) var(--tw-backdrop-hue-rotate) var(--tw-backdrop-invert) var(--tw-backdrop-opacity) var(--tw-backdrop-saturate) var(--tw-backdrop-sepia)}.backdrop-blur-sm{--tw-backdrop-blur:blur(4px);-webkit-backdrop-filter:var(--tw-backdrop-blur) var(--tw-backdrop-brightness) var(--tw-backdrop-contrast) var(--tw-backdrop-grayscale) var(--tw-backdrop-hue-rotate) var(--tw-backdrop-invert) var(--tw-backdrop-opacity) var(--tw-backdrop-saturate) var(--tw-backdrop-sepia);backdrop-filter:var(--tw-backdrop-blur) var(--tw-backdrop-brightness) var(--tw-backdrop-contrast) var(--tw-backdrop-grayscale) var(--tw-backdrop-hue-rotate) var(--tw-backdrop-invert) var(--tw-backdrop-opacity) var(--tw-backdrop-saturate) var(--tw-backdrop-sepia)}.transition-all{transition-property:all;transition-timing-function:cubic-bezier(0.4, 0, 0.2, 1);transition-duration:150ms}.transition-colors{transition-property:color, background-color, border-color, fill, stroke, -webkit-text-decoration-color;transition-property:color, background-color, border-color, text-decoration-color, fill, stroke;transition-property:color, background-color, border-color, text-decoration-color, fill, stroke, -webkit-text-decoration-color;transition-timing-function:cubic-bezier(0.4, 0, 0.2, 1);transition-duration:150ms}.duration-1000{transition-duration:1000ms}.hover\:text-red-500:hover{--tw-text-opacity:1;color:rgb(239 68 68 / var(--tw-text-opacity, 1))}.focus\:border-emerald-500:focus{--tw-border-opacity:1;border-color:rgb(16 185 129 / var(--tw-border-opacity, 1))}</style></head>
-<body class="text-slate-800 pb-24 select-none" id="artifacts-component-root-html">
+</head>
+<body class="text-slate-800 pb-24 select-none">
 
 <!-- ============================================================
      ESTADO (SISTEMA QUINE)
      ============================================================ -->
 <script id="app-state">
-    /* STATE_START */ 
- window.APP_DATA = {"config":{"goalKg":12,"durationDays":60,"startWeight":90,"currentWeight":90,"bmr":1800},"days":[{"day":1,"weight":90,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":2,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":3,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":4,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":5,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":6,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":7,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":8,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":9,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":10,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":11,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":12,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":13,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":14,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":15,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":16,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":17,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":18,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":19,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":20,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":21,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":22,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":23,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":24,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":25,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":26,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":27,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":28,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":29,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":30,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":31,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":32,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":33,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":34,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":35,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":36,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":37,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":38,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":39,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":40,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":41,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":42,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":43,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":44,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":45,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":46,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":47,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":48,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":49,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":50,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":51,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":52,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":53,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":54,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":55,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":56,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":57,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":58,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":59,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false},{"day":60,"weight":null,"foods":[],"activityType":null,"activityKm":0,"water":0,"electrolytes":false}]}; 
- /* STATE_END */
+    /* STATE_START */
+    (function(){var d=[];for(var i=1;i<=60;i++)d.push({day:i,weight:i===1?90:null,foods:[],activityType:null,activityKm:0,water:0,electrolytes:false});window.APP_DATA={config:{goalKg:12,durationDays:60,startWeight:90,currentWeight:90,height:0,age:0,sex:'M'},days:d};})();
+    /* STATE_END */
 </script>
 
 <!-- ============================================================
@@ -327,7 +42,7 @@
 <div class="fixed top-0 left-0 right-0 h-16 bg-white/90 backdrop-blur-md border-b border-slate-200 z-50 flex items-center justify-between px-5 shadow-sm">
     <div onclick="switchView('settings')" class="cursor-pointer">
         <h1 class="font-black text-xl tracking-tighter text-slate-900 leading-none">META <span class="text-emerald-600" id="header-goal">12KG</span></h1>
-        <p class="text-[9px] font-extrabold text-slate-400 uppercase tracking-widest mt-0.5" id="header-day">DIA 2 • 60 DIAS</p>
+        <p class="text-[9px] font-extrabold text-slate-400 uppercase tracking-widest mt-0.5" id="header-day">DIA 1 • 60 DIAS</p>
     </div>
     <button onclick="downloadApp()" class="bg-slate-900 text-white p-2 rounded-full tap-effect shadow-lg shadow-slate-900/20">
         <span class="material-symbols-rounded">ios_share</span>
@@ -340,7 +55,7 @@
 <div class="pt-20 px-4 max-w-lg mx-auto w-full min-h-screen">
 
     <!-- VIEW: TRACKER -->
-    <div class="view-section space-y-5 active" id="view-tracker">
+    <div class="view-section active space-y-5" id="view-tracker">
 
         <!-- Seletor de Dia -->
         <div class="flex items-center justify-between bg-white p-2 rounded-2xl shadow-sm border border-slate-200">
@@ -349,8 +64,8 @@
             </button>
             <div class="text-center flex-1">
                 <div id="day-label" class="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">Editando</div>
-                <div class="text-2xl font-black text-slate-800">DIA <span id="display-day-num">2</span></div>
-                <button id="btn-hoje" onclick="goToToday()" class="text-[9px] font-bold text-emerald-600 mt-0.5 tap-effect hidden">← Voltar ao Hoje</button>
+                <div class="text-2xl font-black text-slate-800">DIA <span id="display-day-num">1</span></div>
+                <button id="btn-hoje" onclick="goToToday()" class="hidden text-[9px] font-bold text-emerald-600 mt-0.5 tap-effect">← Voltar ao Hoje</button>
             </div>
             <button onclick="changeDay(1)" class="w-12 h-12 flex items-center justify-center text-slate-400 tap-effect">
                 <span class="material-symbols-rounded">chevron_right</span>
@@ -358,18 +73,18 @@
         </div>
 
         <!-- Card de Análise (Gap) -->
-        <div class="bg-emerald-600 rounded-3xl p-5 text-white shadow-xl relative overflow-hidden" id="gap-card">
+        <div class="rounded-3xl p-5 text-white shadow-xl relative overflow-hidden" id="gap-card">
             <div class="relative z-10">
                 <h3 class="text-xs font-bold uppercase opacity-60 mb-1">Análise de Meta</h3>
-                <p class="text-lg font-bold leading-tight" id="gap-message">Ritmo perfeito! Déficit atingido para o dia.</p>
+                <p class="text-lg font-bold leading-tight" id="gap-message">Calculando...</p>
                 <div class="mt-4 pt-4 border-t border-white/10 flex justify-between items-end">
                     <div>
                         <span class="text-[10px] uppercase font-bold opacity-60 block">Déficit Hoje</span>
-                        <span class="text-2xl font-black" id="today-deficit">1800 kcal</span>
+                        <span class="text-2xl font-black" id="today-deficit">— kcal</span>
                     </div>
                     <div class="text-right">
                         <span class="text-[10px] uppercase font-bold opacity-60 block">Status</span>
-                        <span class="text-xs font-bold bg-white/20 px-2 py-0.5 rounded-full" id="status-badge">NO PLANO</span>
+                        <span class="text-xs font-bold bg-white/20 px-2 py-0.5 rounded-full" id="status-badge">—</span>
                     </div>
                 </div>
             </div>
@@ -382,10 +97,10 @@
                 <span class="text-xs font-bold text-slate-800" id="today-kcal-total">0 kcal</span>
             </div>
             <div class="grid grid-cols-4 gap-2 mb-4">
-                <button onclick="openFoodModal('meat')" class="bg-slate-50 h-16 rounded-2xl flex items-center justify-center text-2xl tap-effect">🥩</button>
+                <button onclick="openFoodModal('meat')"    class="bg-slate-50 h-16 rounded-2xl flex items-center justify-center text-2xl tap-effect">🥩</button>
                 <button onclick="openFoodModal('chicken')" class="bg-slate-50 h-16 rounded-2xl flex items-center justify-center text-2xl tap-effect">🍗</button>
-                <button onclick="openFoodModal('egg')" class="bg-slate-50 h-16 rounded-2xl flex items-center justify-center text-2xl tap-effect">🥚</button>
-                <button onclick="openFoodModal('cheese')" class="bg-slate-50 h-16 rounded-2xl flex items-center justify-center text-2xl tap-effect">🧀</button>
+                <button onclick="openFoodModal('egg')"     class="bg-slate-50 h-16 rounded-2xl flex items-center justify-center text-2xl tap-effect">🥚</button>
+                <button onclick="openFoodModal('cheese')"  class="bg-slate-50 h-16 rounded-2xl flex items-center justify-center text-2xl tap-effect">🧀</button>
             </div>
             <div id="food-log" class="space-y-2"></div>
         </div>
@@ -398,7 +113,7 @@
             </div>
 
             <!-- Estado: sem atividade necessária -->
-            <div id="activity-no-need" class="text-center py-3">
+            <div id="activity-no-need" class="hidden text-center py-3">
                 <p class="text-xl mb-1">🎉</p>
                 <p class="text-xs font-bold text-emerald-600">Sem atividade necessária!</p>
                 <p class="text-[10px] text-slate-400 mt-0.5">O seu BMR já cobre o déficit para hoje.</p>
@@ -500,39 +215,66 @@
         <div class="grid grid-cols-2 gap-3">
             <div class="bg-white p-4 rounded-3xl border border-slate-200">
                 <span class="text-[10px] font-bold text-slate-400 uppercase block mb-1">Déficit Acumulado</span>
-                <span class="text-lg font-black text-slate-800" id="dash-deficit-total">1800 kcal</span>
-                <p class="text-[9px] text-slate-400 mt-0.5" id="dash-deficit-pct">de 92400 kcal necessários</p>
+                <span class="text-lg font-black text-slate-800" id="dash-deficit-total">0 kcal</span>
+                <p class="text-[9px] text-slate-400 mt-0.5" id="dash-deficit-pct">de 0 kcal necessários</p>
             </div>
             <div class="bg-white p-4 rounded-3xl border border-slate-200">
                 <span class="text-[10px] font-bold text-slate-400 uppercase block mb-1">Dias Registrados</span>
-                <span class="text-lg font-black text-slate-800" id="dash-days-done">1</span>
+                <span class="text-lg font-black text-slate-800" id="dash-days-done">0</span>
                 <p class="text-[9px] text-slate-400 mt-0.5" id="dash-days-remaining">de 60 dias no plano</p>
             </div>
             <div class="bg-white p-4 rounded-3xl border border-slate-200">
                 <span class="text-[10px] font-bold text-slate-400 uppercase block mb-1">Média Diária</span>
-                <span class="text-lg font-black text-slate-800" id="dash-avg-deficit">1800 kcal</span>
-                <p class="text-[9px] text-slate-400 mt-0.5" id="dash-avg-target">alvo: 1540 kcal/dia</p>
+                <span class="text-lg font-black text-slate-800" id="dash-avg-deficit">— kcal</span>
+                <p class="text-[9px] text-slate-400 mt-0.5" id="dash-avg-target">alvo: — kcal/dia</p>
             </div>
             <div class="bg-white p-4 rounded-3xl border border-slate-200">
                 <span class="text-[10px] font-bold text-slate-400 uppercase block mb-1">Dias No Plano</span>
-                <span class="text-lg font-black text-slate-800" id="dash-on-track">1</span>
-                <p class="text-[9px] text-slate-400 mt-0.5" id="dash-on-track-pct">de 1 registrados</p>
+                <span class="text-lg font-black text-slate-800" id="dash-on-track">0</span>
+                <p class="text-[9px] text-slate-400 mt-0.5" id="dash-on-track-pct">de 0 registrados</p>
             </div>
         </div>
 
         <!-- Gráfico -->
         <div class="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm">
             <h3 class="text-xs font-bold text-slate-400 uppercase mb-6">Evolução do Peso</h3>
-            <div class="h-64"><canvas id="weightChart" height="0" style="display: block; box-sizing: border-box; height: 0px; width: 0px;" width="0"></canvas></div>
+            <div class="h-64"><canvas id="weightChart"></canvas></div>
         </div>
     </div>
 
     <!-- VIEW: SETTINGS -->
-    <div class="view-section space-y-6" id="view-settings">
-        <div class="bg-white p-8 rounded-[40px] shadow-sm border border-slate-200">
-            <h2 class="text-2xl font-black text-slate-900 mb-2">Configurações</h2>
-            <p class="text-sm text-slate-500 mb-8">Personalize sua meta de desafio.</p>
-            <div class="space-y-5">
+    <div class="view-section space-y-5" id="view-settings">
+        <div class="bg-white p-6 rounded-[40px] shadow-sm border border-slate-200">
+            <h2 class="text-lg font-black text-slate-900 mb-1">Perfil</h2>
+            <p class="text-xs text-slate-400 mb-5">Usado para calcular seu BMR (gasto em repouso).</p>
+            <div class="space-y-4">
+                <div>
+                    <label class="text-[10px] font-bold text-slate-400 uppercase mb-2 block">Sexo</label>
+                    <div class="flex gap-3">
+                        <button onclick="setCfgSex('M')" class="cfg-sex-btn flex-1 h-12 rounded-2xl font-bold text-sm border-2 tap-effect bg-emerald-50 border-emerald-500 text-emerald-700" data-sex="M">Masculino</button>
+                        <button onclick="setCfgSex('F')" class="cfg-sex-btn flex-1 h-12 rounded-2xl font-bold text-sm border-2 tap-effect bg-slate-50 border-transparent text-slate-500" data-sex="F">Feminino</button>
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 gap-3">
+                    <div>
+                        <label class="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Idade (anos)</label>
+                        <input type="number" id="cfg-age" class="w-full p-3 bg-slate-50 rounded-2xl border-2 border-transparent focus:border-emerald-500 outline-none font-bold text-xl">
+                    </div>
+                    <div>
+                        <label class="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Estatura (cm)</label>
+                        <input type="number" id="cfg-height" class="w-full p-3 bg-slate-50 rounded-2xl border-2 border-transparent focus:border-emerald-500 outline-none font-bold text-xl">
+                    </div>
+                </div>
+                <div class="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 flex justify-between items-center">
+                    <span class="text-[10px] font-bold text-emerald-600 uppercase">BMR Calculado</span>
+                    <span class="text-sm font-black text-emerald-700" id="cfg-bmr-display">— kcal/dia</span>
+                </div>
+            </div>
+        </div>
+        <div class="bg-white p-6 rounded-[40px] shadow-sm border border-slate-200">
+            <h2 class="text-lg font-black text-slate-900 mb-1">Meta</h2>
+            <p class="text-xs text-slate-400 mb-5">Defina seu objetivo de perda.</p>
+            <div class="space-y-4">
                 <div>
                     <label class="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Meta de Perda (kg)</label>
                     <input type="number" id="cfg-goal" class="w-full p-4 bg-slate-50 rounded-2xl border-2 border-transparent focus:border-emerald-500 outline-none font-bold text-xl">
@@ -545,9 +287,7 @@
                     <label class="text-[10px] font-bold text-slate-400 uppercase mb-1 block">Peso Inicial (kg)</label>
                     <input type="number" id="cfg-start" class="w-full p-4 bg-slate-50 rounded-2xl border-2 border-transparent focus:border-emerald-500 outline-none font-bold text-xl">
                 </div>
-                <button onclick="saveConfig()" class="w-full bg-emerald-600 text-white h-16 rounded-2xl font-bold text-lg shadow-xl shadow-emerald-200 tap-effect mt-4">
-                    RECALCULAR TUDO
-                </button>
+                <button onclick="saveConfig()" class="w-full bg-emerald-600 text-white h-16 rounded-2xl font-bold text-lg shadow-xl shadow-emerald-200 tap-effect mt-2">RECALCULAR TUDO</button>
             </div>
         </div>
         <div class="p-6 bg-slate-900 rounded-[40px] text-white">
@@ -562,7 +302,7 @@
      TAB BAR
      ============================================================ -->
 <div class="fixed bottom-0 w-full bg-white/95 backdrop-blur-md border-t border-slate-200 h-20 flex justify-around items-start pt-3 z-50">
-    <button onclick="switchView('tracker')" class="nav-btn flex flex-col items-center justify-center w-full tap-effect text-emerald-600" data-id="tracker">
+    <button onclick="switchView('tracker')" class="nav-btn text-emerald-600 flex flex-col items-center justify-center w-full tap-effect" data-id="tracker">
         <span class="material-symbols-rounded text-2xl mb-0.5">edit_square</span>
         <span class="text-[9px] font-black uppercase">Registro</span>
     </button>
@@ -570,7 +310,7 @@
         <span class="material-symbols-rounded text-2xl mb-0.5">donut_large</span>
         <span class="text-[9px] font-black uppercase">Análise</span>
     </button>
-    <button onclick="switchView('settings')" class="nav-btn flex flex-col items-center justify-center w-full tap-effect text-slate-300" data-id="settings">
+    <button onclick="switchView('settings')" class="nav-btn text-slate-300 flex flex-col items-center justify-center w-full tap-effect" data-id="settings">
         <span class="material-symbols-rounded text-2xl mb-0.5">tune</span>
         <span class="text-[9px] font-black uppercase">Meta</span>
     </button>
@@ -579,7 +319,7 @@
 <!-- ============================================================
      MODAL — ALIMENTAÇÃO
      ============================================================ -->
-<div id="modal-food" class="fixed inset-0 z-[100] flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 hidden">
+<div id="modal-food" class="fixed inset-0 z-[100] hidden flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
     <div class="bg-white w-full max-w-sm rounded-[40px] p-8 shadow-2xl">
         <div class="flex justify-between items-center mb-6">
             <div class="flex items-center gap-3">
@@ -599,13 +339,31 @@
 <!-- ============================================================
      MODAL — PRIMEIRO ACESSO (SETUP)
      ============================================================ -->
-<div id="setup-modal" class="fixed inset-0 z-[200] bg-slate-900 flex flex-col items-center justify-center p-8 text-center hidden">
-    <div class="w-24 h-24 bg-emerald-500/20 text-emerald-400 rounded-[35px] flex items-center justify-center mb-8 animate-pulse">
+<div id="setup-modal" class="fixed inset-0 z-[200] bg-slate-900 flex flex-col items-center justify-center p-8 text-center hidden overflow-y-auto">
+    <div class="w-24 h-24 bg-emerald-500/20 text-emerald-400 rounded-[35px] flex items-center justify-center mb-6 animate-pulse">
         <span class="material-symbols-rounded text-5xl">flag</span>
     </div>
-    <h1 class="text-4xl font-black text-white mb-2 tracking-tighter">Primeiro Acesso</h1>
-    <p class="text-slate-400 mb-10 text-sm max-w-xs mx-auto">Configure seu peso atual para iniciarmos o plano de perda.</p>
-    <input type="number" id="setup-weight" placeholder="00.0" class="bg-transparent border-b-2 border-slate-800 text-white text-6xl font-black text-center w-full outline-none mb-12 focus:border-emerald-500 transition-colors">
+    <h1 class="text-4xl font-black text-white mb-1 tracking-tighter">Primeiro Acesso</h1>
+    <p class="text-slate-400 mb-8 text-sm max-w-xs mx-auto">Preenche os dados abaixo para o app calcular tudo corretamente.</p>
+    <div class="w-full max-w-xs mb-6">
+        <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 text-left">Sexo</p>
+        <div class="flex gap-3">
+            <button onclick="setSex('M')" class="setup-sex-btn flex-1 h-14 rounded-2xl font-bold text-white border-2 border-emerald-500 bg-emerald-500/20 tap-effect" data-sex="M">Masculino</button>
+            <button onclick="setSex('F')" class="setup-sex-btn flex-1 h-14 rounded-2xl font-bold text-slate-500 border-2 border-slate-700 bg-transparent tap-effect" data-sex="F">Feminino</button>
+        </div>
+    </div>
+    <div class="w-full max-w-xs mb-6">
+        <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 text-left">Idade (anos)</p>
+        <input type="number" id="setup-age" placeholder="00" class="bg-transparent border-b-2 border-slate-800 text-white text-4xl font-black text-left w-full outline-none focus:border-emerald-500 transition-colors">
+    </div>
+    <div class="w-full max-w-xs mb-6">
+        <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 text-left">Estatura (cm)</p>
+        <input type="number" id="setup-height" placeholder="000" class="bg-transparent border-b-2 border-slate-800 text-white text-4xl font-black text-left w-full outline-none focus:border-emerald-500 transition-colors">
+    </div>
+    <div class="w-full max-w-xs mb-8">
+        <p class="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-2 text-left">Peso atual (kg)</p>
+        <input type="number" id="setup-weight" placeholder="00.0" class="bg-transparent border-b-2 border-slate-800 text-white text-4xl font-black text-left w-full outline-none focus:border-emerald-500 transition-colors">
+    </div>
     <button onclick="initSetup()" class="w-full max-w-xs bg-emerald-500 text-white h-16 rounded-3xl font-bold text-lg shadow-xl shadow-emerald-500/20 tap-effect">INICIAR AGORA</button>
 </div>
 
@@ -629,6 +387,20 @@ const ACTIVITY_DB = {
     bike:      { name:'Bike',      icon:'🚲', kcalPerKm:35 },
     treadmill: { name:'Esteira',   icon:'🏃', kcalPerKm:70 }
 };
+
+// ============================================================
+// BMR — Mifflin-St Jeor (dinâmico pelo peso atual)
+// ============================================================
+function calcBMR() {
+    const cfg = window.APP_DATA.config;
+    const peso   = cfg.currentWeight || cfg.startWeight || 70;
+    const altura = cfg.height || 170;
+    const idade  = cfg.age    || 25;
+    // Masculino: 10×peso + 6.25×altura − 5×idade + 5
+    // Feminino:  10×peso + 6.25×altura − 5×idade − 161
+    const base = 10 * peso + 6.25 * altura - 5 * idade;
+    return cfg.sex === 'F' ? base - 161 : base + 5;
+}
 
 // ============================================================
 // ESTADO INTERNO
@@ -668,7 +440,18 @@ document.addEventListener('DOMContentLoaded', () => {
     });
 
     // 4) Fluxo de entrada
-    if (window.APP_DATA.config.startWeight === 0) {
+    if (window.APP_DATA.config.startWeight === 0 || !window.APP_DATA.config.height || !window.APP_DATA.config.age) {
+        // Preencher campos do setup com dados que já existam (migração)
+        if (window.APP_DATA.config.startWeight) {
+            document.getElementById('setup-weight').value = window.APP_DATA.config.startWeight;
+        }
+        if (window.APP_DATA.config.height) {
+            document.getElementById('setup-height').value = window.APP_DATA.config.height;
+        }
+        if (window.APP_DATA.config.age) {
+            document.getElementById('setup-age').value = window.APP_DATA.config.age;
+        }
+        setSex(window.APP_DATA.config.sex || 'M');
         document.getElementById('setup-modal').classList.remove('hidden');
     } else {
         initApp();
@@ -688,13 +471,32 @@ function initApp() {
 
 function initSetup() {
     const w = parseFloat(document.getElementById('setup-weight').value);
-    if (!w) return;
+    const h = parseFloat(document.getElementById('setup-height').value);
+    const a = parseFloat(document.getElementById('setup-age').value);
+    if (!w || !h || !a) { alert('Preenche todos os campos por favor.'); return; }
     window.APP_DATA.config.startWeight   = w;
     window.APP_DATA.config.currentWeight = w;
+    window.APP_DATA.config.height        = h;
+    window.APP_DATA.config.age           = a;
+    // sex já foi setado pelo setSex()
     window.APP_DATA.days[0].weight       = w;
     document.getElementById('setup-modal').classList.add('hidden');
     saveAndSync();
     initApp();
+}
+
+// Botão sexo no modal de setup
+function setSex(val) {
+    window.APP_DATA.config.sex = val;
+    document.querySelectorAll('.setup-sex-btn').forEach(btn => {
+        const on = btn.dataset.sex === val;
+        btn.classList.toggle('border-emerald-500',  on);
+        btn.classList.toggle('bg-emerald-500/20',   on);
+        btn.classList.toggle('text-white',          on);
+        btn.classList.toggle('border-slate-700',   !on);
+        btn.classList.toggle('bg-transparent',     !on);
+        btn.classList.toggle('text-slate-500',     !on);
+    });
 }
 
 // ============================================================
@@ -728,11 +530,16 @@ function saveConfig() {
     const g = parseFloat(document.getElementById('cfg-goal').value);
     const d = parseInt(document.getElementById('cfg-days').value);
     const s = parseFloat(document.getElementById('cfg-start').value);
-    if (!g || !d || !s) return;
+    const h = parseFloat(document.getElementById('cfg-height').value);
+    const a = parseFloat(document.getElementById('cfg-age').value);
+    if (!g || !d || !s || !h || !a) { alert('Preenche todos os campos por favor.'); return; }
 
     window.APP_DATA.config.goalKg       = g;
     window.APP_DATA.config.durationDays = d;
     window.APP_DATA.config.startWeight  = s;
+    window.APP_DATA.config.height       = h;
+    window.APP_DATA.config.age          = a;
+    // sex já foi setado pelo setCfgSex()
 
     // Expandir dias se necessário
     if (d > window.APP_DATA.days.length) {
@@ -757,6 +564,21 @@ function saveConfig() {
     switchView('tracker');
 }
 
+// Botão sexo nas configurações
+function setCfgSex(val) {
+    window.APP_DATA.config.sex = val;
+    document.querySelectorAll('.cfg-sex-btn').forEach(btn => {
+        const on = btn.dataset.sex === val;
+        btn.classList.toggle('bg-emerald-50',       on);
+        btn.classList.toggle('border-emerald-500',  on);
+        btn.classList.toggle('text-emerald-700',    on);
+        btn.classList.toggle('bg-slate-50',        !on);
+        btn.classList.toggle('border-transparent', !on);
+        btn.classList.toggle('text-slate-500',     !on);
+    });
+    updateUI();
+}
+
 // ============================================================
 // GAP ANALYZER — THE BRAIN
 // ============================================================
@@ -778,7 +600,7 @@ function analyzeGap(totalFoodKcal) {
         if (d.day < currentDay) {
             const kIn     = d.foods.reduce((a, f) => a + f.kcal, 0);
             const actBurn = getActivityBurn(d);
-            deficitAccumulated += (cfg.bmr + actBurn) - kIn;
+            deficitAccumulated += (calcBMR() + actBurn) - kIn;
             daysPassed++;
         }
     });
@@ -786,7 +608,7 @@ function analyzeGap(totalFoodKcal) {
     // Dados do dia atual (editado)
     const todayData    = window.APP_DATA.days[currentDay - 1];
     const todayActBurn = getActivityBurn(todayData);
-    const todayDeficit = (cfg.bmr + todayActBurn) - totalFoodKcal;
+    const todayDeficit = (calcBMR() + todayActBurn) - totalFoodKcal;
 
     // Alvo diário restante
     const remainingKcal = totalKcalGoal - deficitAccumulated;
@@ -795,7 +617,7 @@ function analyzeGap(totalFoodKcal) {
 
     // Queima necessária: dailyTarget = BMR + actBurn - foodIn
     //                    actBurn      = dailyTarget - BMR + foodIn
-    const neededBurn = Math.max(0, dailyTarget - cfg.bmr + totalFoodKcal);
+    const neededBurn = Math.max(0, dailyTarget - calcBMR() + totalFoodKcal);
 
     // Persistir para a seção de atividade
     currentNeededBurn  = neededBurn;
@@ -896,7 +718,7 @@ function updateActivitySection() {
 
         // Alerta se insuficiente
         const foodKcal     = day.foods.reduce((a, f) => a + f.kcal, 0);
-        const todayDeficit = (window.APP_DATA.config.bmr + burn) - foodKcal;
+        const todayDeficit = (calcBMR() + burn) - foodKcal;
         const warningEl    = document.getElementById('activity-warning');
         if (todayDeficit < currentDailyTarget) {
             const shortfall = Math.round(currentDailyTarget - todayDeficit);
@@ -958,9 +780,23 @@ function updateUI() {
     document.getElementById('inp-elec').checked = day.electrolytes;
 
     // --- Inputs do settings ---
-    document.getElementById('cfg-goal').value  = cfg.goalKg;
-    document.getElementById('cfg-days').value  = cfg.durationDays;
-    document.getElementById('cfg-start').value = cfg.startWeight;
+    document.getElementById('cfg-goal').value   = cfg.goalKg;
+    document.getElementById('cfg-days').value   = cfg.durationDays;
+    document.getElementById('cfg-start').value  = cfg.startWeight;
+    document.getElementById('cfg-height').value = cfg.height || '';
+    document.getElementById('cfg-age').value    = cfg.age    || '';
+    // Sexo nos botões de configurações
+    document.querySelectorAll('.cfg-sex-btn').forEach(btn => {
+        const on = btn.dataset.sex === cfg.sex;
+        btn.classList.toggle('bg-emerald-50',       on);
+        btn.classList.toggle('border-emerald-500',  on);
+        btn.classList.toggle('text-emerald-700',    on);
+        btn.classList.toggle('bg-slate-50',        !on);
+        btn.classList.toggle('border-transparent', !on);
+        btn.classList.toggle('text-slate-500',     !on);
+    });
+    // BMR calculado
+    document.getElementById('cfg-bmr-display').innerText = calcBMR() + ' kcal/dia';
 
     // --- Lista de alimentos ---
     const listEl  = document.getElementById('food-log');
@@ -1021,7 +857,7 @@ function updateDashStats() {
 
         const kIn     = d.foods.reduce((a, f) => a + f.kcal, 0);
         const actBurn = getActivityBurn(d);
-        const deficit = (cfg.bmr + actBurn) - kIn;
+        const deficit = (calcBMR() + actBurn) - kIn;
 
         // Alvo naquele ponto no tempo
         const remainAtPoint  = totalKcalGoal - runningDeficit;
@@ -1200,6 +1036,5 @@ function downloadApp() {
     alert('Arquivo index.html pronto para upload no GitHub!');
 }
 </script>
-
-
-</body></html>
+</body>
+</html>
