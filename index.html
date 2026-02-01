@@ -545,14 +545,28 @@ let weightChart          = null;
 // ============================================================
 // CICLO DE VIDA
 // ============================================================
+function resetAppData() {
+    var d = [];
+    for (var i = 1; i <= 60; i++) {
+        d.push({ day:i, weight:null, foods:[], activityType:null, activityKm:0, water:0, electrolytes:false });
+    }
+    window.APP_DATA = {
+        config: { goalKg:12, durationDays:60, startWeight:0, currentWeight:0, height:0, age:0, sex:'M' },
+        days: d
+    };
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     // 0) PWA: ícone + manifest + service worker
     setupPWA();
 
-    // 1) Carregar localStorage
+    // 1) Carregar localStorage — se não tiver nada, começa do zero
     const saved = localStorage.getItem('meta_pwa_data');
     if (saved) {
-        try { window.APP_DATA = JSON.parse(saved); } catch(e) { /* ignora */ }
+        try { window.APP_DATA = JSON.parse(saved); } catch(e) { resetAppData(); }
+    } else {
+        // Dispositivo novo: ignora estado do HTML (quine), inicia limpo
+        resetAppData();
     }
 
     // 2) Migração: formato antigo (walkKm) → novo (activityType + activityKm)
