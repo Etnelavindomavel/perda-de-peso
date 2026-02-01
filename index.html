@@ -294,6 +294,18 @@
             <h3 class="font-bold mb-2">Backup de Segurança</h3>
             <p class="text-xs text-slate-400">Seus dados são salvos localmente. Use o botão de download no topo para baixar o arquivo HTML com seu progresso incluído.</p>
         </div>
+        <div class="rounded-[40px] overflow-hidden shadow-lg border border-slate-700" style="background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);">
+            <div class="p-5 pb-0">
+                <div class="flex items-center gap-3 mb-2">
+                    <span class="text-2xl">🏋️</span>
+                    <h3 class="font-black text-white text-base">Precisa de Motivação?</h3>
+                </div>
+                <p class="text-xs text-slate-400 mb-4 ml-9">Chame o personal mais famoso do planeta.</p>
+            </div>
+            <button onclick="openPersonalConfirm()" class="w-full py-4 font-black text-sm text-white tracking-widest uppercase tap-effect" style="background: linear-gradient(90deg, #c0392b, #e74c3c, #c0392b); box-shadow: 0 4px 20px rgba(231,76,60,0.4);">
+                🔴 FALE COM UM PERSONAL
+            </button>
+        </div>
         <div class="p-6 bg-red-50 border border-red-200 rounded-[40px]">
             <h3 class="font-bold text-red-700 mb-1">Começar do Zero</h3>
             <p class="text-xs text-red-400 mb-4">Apaga todo o progresso e perfil, retornando ao estado inicial.</p>
@@ -370,6 +382,45 @@
         <input type="number" id="setup-weight" placeholder="00.0" class="bg-transparent border-b-2 border-slate-800 text-white text-4xl font-black text-left w-full outline-none focus:border-emerald-500 transition-colors">
     </div>
     <button onclick="initSetup()" class="w-full max-w-xs bg-emerald-500 text-white h-16 rounded-3xl font-bold text-lg shadow-xl shadow-emerald-500/20 tap-effect">INICIAR AGORA</button>
+</div>
+
+<!-- ============================================================
+     MODAL — PERSONAL (CONFIRMAÇÃO)
+     ============================================================ -->
+<div id="modal-personal-confirm" class="fixed inset-0 z-[100] hidden flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4">
+    <div class="w-full max-w-sm rounded-[40px] overflow-hidden shadow-2xl" style="background: linear-gradient(160deg, #1a1a2e, #16213e);">
+        <div class="p-8 text-center">
+            <div class="text-6xl mb-4">🤖</div>
+            <h3 class="font-black text-white text-xl mb-4">Tem certeza?</h3>
+            <p class="text-slate-300 text-sm leading-relaxed mb-1">"Venha comigo se quiser viver...</p>
+            <p class="text-slate-300 text-sm leading-relaxed mb-6">...seu déficit."</p>
+            <div class="flex gap-3">
+                <button onclick="closePersonalConfirm()" class="flex-1 h-14 rounded-2xl border-2 border-slate-600 font-bold text-slate-400 tap-effect">Não, tenho medo</button>
+                <button onclick="openArnold()" class="flex-1 h-14 rounded-2xl font-bold text-white tap-effect" style="background: linear-gradient(90deg, #c0392b, #e74c3c);">Pode vir</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================
+     MODAL — ARNOLD (TELA CHEIA)
+     ============================================================ -->
+<div id="modal-arnold" class="fixed inset-0 z-[150] hidden flex flex-col items-center justify-between" style="background: linear-gradient(180deg, #0a0a0a 0%, #1a0000 100%);">
+    <!-- Botão fechar topo -->
+    <div class="w-full flex justify-end p-4">
+        <button onclick="closeArnold()" class="bg-white/10 border border-white/20 text-white p-2 rounded-full tap-effect">
+            <span class="material-symbols-rounded text-xl">close</span>
+        </button>
+    </div>
+    <!-- Foto -->
+    <div class="flex-1 flex items-center justify-center px-4 pb-2" style="max-height: 55vh;">
+        <img id="arnold-img" src="https://upload.wikimedia.org/wikipedia/commons/thumb/0/0c/Arnold_Schwarzenegger_at_the_2014_Jewish_Film_Festival_Gala_%28cropped%29.jpg/800px-Arnold_Schwarzenegger_at_the_2014_Jewish_Film_Festival_Gala_%28cropped%29.jpg" alt="Arnold" class="h-full object-contain rounded-2xl shadow-2xl shadow-red-900/30" style="border: 3px solid rgba(193,39,39,0.4);">
+    </div>
+    <!-- Frase -->
+    <div class="w-full text-center px-6 pb-10 pt-4">
+        <p class="text-white font-black text-3xl tracking-tighter leading-tight" style="text-shadow: 0 0 30px rgba(220,38,38,0.6);">I'LL BE BACK.</p>
+        <p class="text-red-400 text-sm font-bold mt-2 tracking-wide">...mas seu déficit não vai escapar.</p>
+    </div>
 </div>
 
 <!-- ============================================================
@@ -1093,6 +1144,20 @@ function playSound() {
         const synth = new Tone.Synth().toDestination();
         synth.triggerAttackRelease('G5','32n');
     } catch(e) { /* silêncio se indisponível */ }
+}
+
+// ============================================================
+// PERSONAL — Arnold easter egg
+// ============================================================
+function openPersonalConfirm()  { document.getElementById('modal-personal-confirm').classList.remove('hidden'); }
+function closePersonalConfirm() { document.getElementById('modal-personal-confirm').classList.add('hidden');    }
+
+function openArnold() {
+    closePersonalConfirm();
+    document.getElementById('modal-arnold').classList.remove('hidden');
+}
+function closeArnold() {
+    document.getElementById('modal-arnold').classList.add('hidden');
 }
 
 // ============================================================
