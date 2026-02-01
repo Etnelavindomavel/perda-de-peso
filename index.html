@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-    <title>Meta 12kg - Tracker Inteligente</title>
+    <title>Carnívoros</title>
 
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap" rel="stylesheet">
@@ -294,6 +294,11 @@
             <h3 class="font-bold mb-2">Backup de Segurança</h3>
             <p class="text-xs text-slate-400">Seus dados são salvos localmente. Use o botão de download no topo para baixar o arquivo HTML com seu progresso incluído.</p>
         </div>
+        <div class="p-6 bg-red-50 border border-red-200 rounded-[40px]">
+            <h3 class="font-bold text-red-700 mb-1">Começar do Zero</h3>
+            <p class="text-xs text-red-400 mb-4">Apaga todo o progresso e perfil, retornando ao estado inicial.</p>
+            <button onclick="openResetModal()" class="w-full border-2 border-red-400 text-red-500 h-12 rounded-2xl font-bold text-sm tap-effect">APAGAR TUDO</button>
+        </div>
     </div>
 
 </div><!-- fim main -->
@@ -368,6 +373,23 @@
 </div>
 
 <!-- ============================================================
+     MODAL — CONFIRMAÇÃO DE RESET
+     ============================================================ -->
+<div id="modal-reset" class="fixed inset-0 z-[100] hidden flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4">
+    <div class="bg-white w-full max-w-sm rounded-[40px] p-8 shadow-2xl text-center">
+        <div class="w-20 h-20 bg-red-100 rounded-full flex items-center justify-center mx-auto mb-6">
+            <span class="material-symbols-rounded text-red-500 text-4xl">warning</span>
+        </div>
+        <h3 class="font-black text-xl text-slate-900 mb-2">Tem certeza?</h3>
+        <p class="text-sm text-slate-400 mb-8">Isso apaga <strong class="text-slate-600">todo o progresso</strong>, perfil e dados de alimentação. Não tem como desfazer.</p>
+        <div class="flex gap-3">
+            <button onclick="closeResetModal()" class="flex-1 h-14 rounded-2xl border-2 border-slate-200 font-bold text-slate-500 tap-effect">Cancelar</button>
+            <button onclick="confirmReset()" class="flex-1 h-14 rounded-2xl bg-red-500 text-white font-bold shadow-lg shadow-red-200 tap-effect">Apagar Tudo</button>
+        </div>
+    </div>
+</div>
+
+<!-- ============================================================
      SCRIPT PRINCIPAL
      ============================================================ -->
 <script>
@@ -387,6 +409,62 @@ const ACTIVITY_DB = {
     bike:      { name:'Bike',      icon:'🚲', kcalPerKm:35 },
     treadmill: { name:'Esteira',   icon:'🏃', kcalPerKm:70 }
 };
+
+// ============================================================
+// PWA — Ícone, Manifest & Service Worker (inline, single-file)
+// ============================================================
+const ICON_SVG = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512"><defs><clipPath id="r"><rect width="512" height="512" rx="110"/></clipPath></defs><rect width="512" height="512" rx="110" fill="#0f172a"/><g clip-path="url(#r)"><line x1="158" y1="295" x2="78" y2="240" stroke="#f0d9c0" stroke-width="44" stroke-linecap="round"/><line x1="354" y1="295" x2="434" y2="240" stroke="#f0d9c0" stroke-width="44" stroke-linecap="round"/><ellipse cx="256" cy="348" rx="118" ry="130" fill="#10b981"/><ellipse cx="256" cy="232" rx="26" ry="22" fill="#f0d9c0"/><circle cx="256" cy="165" r="70" fill="#f0d9c0"/><ellipse cx="256" cy="118" rx="58" ry="30" fill="#1e293b"/><circle cx="210" cy="128" r="24" fill="#1e293b"/><circle cx="302" cy="126" r="22" fill="#1e293b"/><circle cx="232" cy="168" r="12" fill="white"/><circle cx="280" cy="168" r="12" fill="white"/><circle cx="234" cy="171" r="6.5" fill="#1e293b"/><circle cx="282" cy="171" r="6.5" fill="#1e293b"/><ellipse cx="256" cy="198" rx="12" ry="16" fill="#1e293b"/><ellipse cx="256" cy="207" rx="7.5" ry="5.5" fill="#ef4444"/><path d="M118,148 C100,168 100,192 118,198 C136,192 136,168 118,148Z" fill="#60a5fa"/><path d="M388,135 C373,153 373,175 388,180 C403,175 403,153 388,135Z" fill="#60a5fa"/><path d="M244,96 C234,110 234,128 244,133 C254,128 254,110 244,96Z" fill="#60a5fa"/></g></svg>';
+
+function setupPWA() {
+    var svgUri = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(ICON_SVG);
+    setPwaLink('pwa-favicon', 'icon', 'image/svg+xml', svgUri);
+    var img = new Image();
+    img.onload = function () {
+        var png180 = renderIconPNG(img, 180);
+        var png512 = renderIconPNG(img, 512);
+        setPwaLink('pwa-apple-icon', 'apple-touch-icon', 'image/png', png180);
+        var manifest = {
+            name: 'Carnívoros',
+            short_name: 'Carnívoros',
+            description: 'Tracker inteligente de perda de peso com déficit diário',
+            start_url: '.',
+            display: 'standalone',
+            orientation: 'portrait',
+            theme_color: '#0f172a',
+            background_color: '#f8fafc',
+            icons: [
+                { src: png180, sizes: '180x180', type: 'image/png' },
+                { src: png512, sizes: '512x512', type: 'image/png', purpose: 'any maskable' }
+            ]
+        };
+        var mBlob = new Blob([JSON.stringify(manifest)], { type: 'application/json' });
+        setPwaLink('pwa-manifest', 'manifest', 'application/json', URL.createObjectURL(mBlob));
+        registerPwaSW();
+    };
+    img.src = svgUri;
+}
+
+function renderIconPNG(img, size) {
+    var c = document.createElement('canvas');
+    c.width = size; c.height = size;
+    c.getContext('2d').drawImage(img, 0, 0, size, size);
+    return c.toDataURL('image/png');
+}
+
+function setPwaLink(id, rel, type, href) {
+    var el = document.getElementById(id);
+    if (!el) { el = document.createElement('link'); el.id = id; document.head.appendChild(el); }
+    el.rel  = rel;
+    el.type = type;
+    el.href = href;
+}
+
+function registerPwaSW() {
+    if (!('serviceWorker' in navigator)) return;
+    var code = 'const C="meta-pwa-v1";self.addEventListener("install",e=>{e.waitUntil(caches.open(C).then(c=>c.add(".")));self.skipWaiting();});self.addEventListener("activate",e=>{e.waitUntil(caches.keys().then(k=>Promise.all(k.filter(n=>n!==C).map(n=>caches.delete(n)))));self.clients.claim();});self.addEventListener("fetch",e=>{e.respondWith(caches.match(e.request).then(r=>r||fetch(e.request).then(res=>{if(!res||res.status!==200||res.type!=="basic")return res;var c=res.clone();caches.open(C).then(cache=>cache.put(e.request,c));return res;})));});';
+    var blob = new Blob([code], { type: 'application/javascript' });
+    navigator.serviceWorker.register(URL.createObjectURL(blob), { scope: '/' }).catch(function(){});
+}
 
 // ============================================================
 // BMR — Mifflin-St Jeor (dinâmico pelo peso atual)
@@ -417,6 +495,9 @@ let weightChart          = null;
 // CICLO DE VIDA
 // ============================================================
 document.addEventListener('DOMContentLoaded', () => {
+    // 0) PWA: ícone + manifest + service worker
+    setupPWA();
+
     // 1) Carregar localStorage
     const saved = localStorage.getItem('meta_pwa_data');
     if (saved) {
@@ -629,15 +710,15 @@ function analyzeGap(totalFoodKcal) {
     const cardEl  = document.getElementById('gap-card');
 
     if (todayDeficit >= dailyTarget) {
-        msgEl.innerText   = 'Ritmo perfeito! Déficit atingido para o dia.';
+        msgEl.innerText   = 'Toma pexte! Bota pra gerar!!!!';
         badgeEl.innerText = 'NO PLANO';
         cardEl.className  = 'bg-emerald-600 rounded-3xl p-5 text-white shadow-xl relative overflow-hidden';
     } else {
         const gap    = Math.round(dailyTarget - todayDeficit);
         const hasAct = todayData.activityType && todayData.activityKm > 0;
         msgEl.innerText = hasAct
-            ? `Atividade registrada, mas falta +${gap} kcal de déficit. Ajuste se necessário.`
-            : `Adicione atividade para cobrir os +${gap} kcal de déficit restantes.`;
+            ? `É, parece que tu vai ter que ir até a casa de Zezinho Caganeira e voltar umas ${Math.ceil(gap / 400)} vezes.`
+            : `É, parece que tu vai ter que ir até a casa de Zezinho Caganeira e voltar umas 7 vezes.`;
         badgeEl.innerText = 'ATRASO';
         cardEl.className  = 'bg-blue-600 rounded-3xl p-5 text-white shadow-xl relative overflow-hidden';
     }
@@ -1012,6 +1093,37 @@ function playSound() {
         const synth = new Tone.Synth().toDestination();
         synth.triggerAttackRelease('G5','32n');
     } catch(e) { /* silêncio se indisponível */ }
+}
+
+// ============================================================
+// RESET — Começar do Zero
+// ============================================================
+function openResetModal()  { document.getElementById('modal-reset').classList.remove('hidden'); }
+function closeResetModal() { document.getElementById('modal-reset').classList.add('hidden');    }
+
+function confirmReset() {
+    localStorage.removeItem('meta_pwa_data');
+    // Reinicia APP_DATA no estado limpo
+    var d = [];
+    for (var i = 1; i <= 60; i++) {
+        d.push({ day:i, weight:null, foods:[], activityType:null, activityKm:0, water:0, electrolytes:false });
+    }
+    window.APP_DATA = {
+        config: { goalKg:12, durationDays:60, startWeight:0, currentWeight:0, height:0, age:0, sex:'M' },
+        days: d
+    };
+    closeResetModal();
+    // Volta para o setup
+    document.querySelectorAll('.view-section').forEach(el => el.classList.remove('active'));
+    document.getElementById('view-tracker').classList.add('active');
+    document.querySelectorAll('.nav-btn').forEach(b => { b.classList.remove('text-emerald-600'); b.classList.add('text-slate-300'); });
+    document.querySelector('.nav-btn[data-id="tracker"]').classList.remove('text-slate-300');
+    document.querySelector('.nav-btn[data-id="tracker"]').classList.add('text-emerald-600');
+    setSex('M');
+    document.getElementById('setup-weight').value  = '';
+    document.getElementById('setup-height').value  = '';
+    document.getElementById('setup-age').value     = '';
+    document.getElementById('setup-modal').classList.remove('hidden');
 }
 
 // ============================================================
